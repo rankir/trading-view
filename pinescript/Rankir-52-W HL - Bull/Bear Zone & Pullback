@@ -1,0 +1,146 @@
+// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © rankir
+
+//@version=6
+indicator("Rankir-52-W HL - Bull/Bear Zone & Pullback", overlay=true)
+
+// Define the lookback period for 52 weeks (252 trading days in a year)
+const int STANDARD_TRADING_DAYS = 252
+const int MAX_CALENDAR_DAYS = 365
+
+// Function to dynamically calculate lookback period
+method dynamicLookbackLength(int desiredLength) => 
+    result = math.min(desiredLength, bar_index + 1)
+    // LOG: Dynamic length calculation
+    if bar_index % 50 == 0  // Log every 50 bars to avoid spam
+        log.info("Dynamic lookback - Desired: {0}, Bar index: {1}, Calculated: {2}", desiredLength, bar_index, result)
+    result
+
+// Function to check if a bar is within the 365-day limit
+isWithin365Days(int barsBack) =>
+    if barsBack == 0
+        true
+    else
+        currentTime = time
+        targetTime = time[barsBack]
+        daysDiff = (currentTime - targetTime) / (24 * 60 * 60 * 1000)  // Convert milliseconds to days
+        daysDiff <= MAX_CALENDAR_DAYS
+
+// Enhanced function to find highest high within both trading days and calendar days limits
+getValidHigh(int lookbackLength) =>
+    var float validHigh = na
+    validHigh := high
+    
+    for i = 1 to lookbackLength - 1
+        if isWithin365Days(i) and high[i] > validHigh
+            validHigh := high[i]
+    
+    validHigh
+
+// Enhanced function to find lowest low within both trading days and calendar days limits
+getValidLow(int lookbackLength) =>
+    var float validLow = na
+    validLow := low
+    
+    for i = 1 to lookbackLength - 1
+        if isWithin365Days(i) and low[i] < validLow
+            validLow := low[i]
+    
+    validLow
+
+// Input parameters - modified to include options from both scripts
+length = input.int(STANDARD_TRADING_DAYS, title="Period for 52-Week High (Trading Days)", minval=1)
+showDropPercentage = input.bool(true, title="Show Drop Percentage Plot")
+showPullbackPercentage = input.bool(true, title="Show Intraday Pullback Plot")
+thresholdLevel = input.float(10, title="Drop Alert Threshold (%)", step=0.1, minval=0)
+pullbackThreshold = input.float(5, title="Pullback Threshold (%)", step=0.1, minval=0)
+
+int dynamic_length = dynamicLookbackLength(length)
+
+// Calculate the 52-week high and low with 365-day calendar limit
+high_52w = getValidHigh(dynamic_length)
+low_52w = getValidLow(dynamic_length)
+
+// LOG: Track 52-week high/low changes
+if high_52w != high_52w[1]
+    log.info("NEW 52WK HIGH UPDATE - Previous: {0}, New: {1}, Date: {2}", high_52w[1], high_52w, str.format_time(time, "yyyy-MM-dd HH:mm"))
+
+if low_52w != low_52w[1]
+    log.info("NEW 52WK LOW UPDATE - Previous: {0}, New: {1}, Date: {2}", low_52w[1], low_52w, str.format_time(time, "yyyy-MM-dd HH:mm"))
+
+// Detect new highs and lows
+new_high = high == high_52w
+new_low = low == low_52w
+
+// LOG: New high/low detection
+if new_high
+    log.info("🚀 NEW 52-WEEK HIGH DETECTED - Price: {0}, Time: {1}", high, str.format_time(time, "yyyy-MM-dd HH:mm"))
+
+if new_low
+    log.warning("📉 NEW 52-WEEK LOW DETECTED - Price: {0}, Time: {1}", low, str.format_time(time, "yyyy-MM-dd HH:mm"))
+
+// Calculate percentage drop from 52-week high
+drop_percent = ((high_52w - close) / high_52w) * 100
+
+// Calculate drop percentage for the previous bar
+prev_drop_percent = ((high_52w[1] - close[1]) / high_52w[1]) * 100
+
+// NEW: Calculate intraday percentage increase from day's low to close
+intraday_increase_percent = ((close - low) / low) * 100
+significant_intraday_increase = intraday_increase_percent > 5.0
+
+intraday_text = significant_intraday_increase ? "\nIntraday Increase: " + str.tostring(intraday_increase_percent, format.percent) : ""
+   
+// Plot markers for new 52-week highs and lows
+plotshape(series=new_high, location=location.abovebar, color=color.green, style=shape.triangleup, title="New 52-Week High", size=size.tiny)
+plotshape(series=new_low, location=location.belowbar, color=color.red, style=shape.triangledown, title="New 52-Week Low", size=size.tiny)
+
+// NEW: Plot drop percentage from second script when enabled
+// This creates a separate pane below the chart
+plot(showDropPercentage ? drop_percent : na, "Drop % from 52W High", color.new(color.red, 0), 2, plot.style_line, display=display.none)
+plot(showPullbackPercentage ? intraday_increase_percent : na, "Pullback from Days Low", color.new(color.red, 0), 2, plot.style_line, display=display.none)
+
+// Check if it's the last bar (latest candle only)
+is_last_bar() => bar_index == last_bar_index
+
+// Bull and Bear Zone Conditions
+// Bull zone: trigger when previous bar was above 15% drop and current bar is <= 15%
+bull_zone = (is_last_bar()) and (prev_drop_percent > 15 and drop_percent <= 15)
+
+// Bear zone: trigger when previous bar was <= 15% drop and current bar is > 15%
+bear_zone = (is_last_bar()) and (prev_drop_percent <= 15 and drop_percent > 15)
+
+// Display label showing the percentage drop from the 52-week high on the last bar
+if (is_last_bar())
+    if (bull_zone or bear_zone)
+        label.new(x = bar_index, y = low, text = "52W High: " + str.tostring(high_52w, format.mintick) + "\n Current Drop %: " + str.tostring(drop_percent, format.percent) + 
+              "\nPrev Bar Drop %: " + str.tostring(prev_drop_percent, format.percent) + intraday_text, color = drop_percent > 15 ? color.red : color.green, style = label.style_label_up)   
+    else
+        label.new(x=bar_index, y=low, text=str.tostring(drop_percent, format.percent) + intraday_text, color = drop_percent > 15 ? color.red : color.green, style = label.style_label_up)
+
+// Real-time alerts for highs and lows
+if (new_high)
+    alert("New 52-Week High!", alert.freq_once_per_bar_close)
+
+if (new_low)
+    alert("New 52-Week Low!", alert.freq_once_per_bar_close)
+
+// Real-time alerts handling for bull/bear zones
+if (is_last_bar())
+    // Alert for entering Bull Zone (recovery)
+    if (bull_zone)
+        alert("Entered Bull Zone - Recovered from -15% drop!", alert.freq_once_per_bar_close)
+    
+    // Alert for entering Bear Zone (significant drop)
+    if (bear_zone)
+        alert("Entered Bear Zone - Dropped more than 15%!", alert.freq_once_per_bar_close)
+
+// Alert conditions - merged from both scripts
+alertcondition(new_high, title="52-Week High Alert", message="New 52-Week High!")
+alertcondition(new_low, title="52-Week Low Alert", message="New 52-Week Low!")
+alertcondition(bull_zone, title="Entered Bull Zone", message="Stock recovered from -15% drop!")
+alertcondition(bear_zone, title="Entered Bear Zone", message="Stock dropped more than 15% from 52-week high!")
+alertcondition(ta.crossover(drop_percent, thresholdLevel), title="Price dropped below threshold", message="Price dropped {{drop_percent}}% from 52-Week High")
+alertcondition(ta.crossunder(drop_percent, thresholdLevel), title="Price recovered above threshold", message="Price recovered to {{drop_percent}}% from 52-Week High")
+alertcondition(drop_percent >= thresholdLevel, title="Drop percent >= threshold", message="Current drop: {{drop_percent}}%")
+alertcondition(intraday_increase_percent >= pullbackThreshold, title="Intraday pullback", message="Price increased more than {{significant_intraday_increase}}% from today's low to close")
