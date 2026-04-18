@@ -1,0 +1,515 @@
+// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © rankir
+// v3.0 — Dedicated Volume Table (Bottom-Left) | Runtime Display | All Alerts EOD
+// Price-Volume Behavior Expert Edition
+// ─────────────────────────────────────────────────────────────────────────────
+// TABLE LAYOUT (Bottom-Left, updates on every bar in real-time):
+//   ┌─────────────────────────────────────────────────────┐
+//   │  📊  VOLUME ANALYSIS  —  [Signal Badge]             │
+//   ├──────────────────────┬──────────────────────────────┤
+//   │  Today Volume        │  X,XX,XXX                    │
+//   │  Avg Vol (50d)       │  X,XX,XXX                    │
+//   │  Vol Ratio           │  2.3× Avg  [color coded]     │
+//   │  Candle Type         │  ▲ UP / ▼ DOWN               │
+//   │  Close Position      │  Upper 72% / Lower 34%       │
+//   │  Pattern             │  📈 ACCUMULATION             │
+//   │  Pocket Pivot        │  ✅ YES / ✗ NO               │
+//   │  Dry Up              │  🔵 YES / ✗ NO               │
+//   │  U/D Ratio (50d)     │  1.84  [Bullish/Bearish]     │
+//   │  Avg ₹ Vol           │  ₹18.2 Cr                    │
+//   │  52W Context         │  Bull Zone / Bear Zone       │
+//   └──────────────────────┴──────────────────────────────┘
+// ─────────────────────────────────────────────────────────────────────────────
+
+//@version=6
+indicator("Rankir-52-W HL + Volume Table [v3]", overlay=true)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 1 — CONSTANTS
+// ═══════════════════════════════════════════════════════════════════════════
+
+const int STANDARD_TRADING_DAYS = 252
+const int MAX_CALENDAR_DAYS     = 365
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 2 — INPUTS
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ── 52-Week Settings ──────────────────────────────────────────────────────
+length                 = input.int(STANDARD_TRADING_DAYS, "Period for 52-Week High (Trading Days)", minval=1,   group="52-Week Settings")
+showDropPercentage     = input.bool(true,  "Show Drop % Plot (hidden, data window)",                            group="52-Week Settings")
+showPullbackPercentage = input.bool(true,  "Show Intraday Pullback Plot (hidden)",                              group="52-Week Settings")
+thresholdLevel         = input.float(10,   "Drop Alert Threshold (%)",  step=0.1, minval=0,                    group="52-Week Settings")
+pullbackThreshold      = input.float(5,    "Pullback Threshold (%)",    step=0.1, minval=0,                    group="52-Week Settings")
+
+// ── Volume Settings ───────────────────────────────────────────────────────
+volAvgLength           = input.int(50,    "Volume Average Period (days)",                  minval=5,  maxval=200, group="Volume Settings")
+accumMultiplier        = input.float(1.5, "Accum / Dist Threshold (× Avg)",               step=0.1,  minval=1.0, group="Volume Settings")
+climaxMultiplier       = input.float(2.5, "Climax Volume Threshold (× Avg)",              step=0.1,  minval=1.5, group="Volume Settings")
+dryUpMultiplier        = input.float(0.5, "Dry Up / No Supply Threshold (× Avg)",         step=0.05, minval=0.1, group="Volume Settings")
+ppLookback             = input.int(10,    "Pocket Pivot — Down-Day Lookback (bars)",       minval=5,  maxval=20,  group="Volume Settings")
+udLookback             = input.int(50,    "U/D Volume Ratio — Lookback (days)",            minval=10, maxval=100, group="Volume Settings")
+showPocketPivotMark    = input.bool(true, "Show Pocket Pivot Marker on Chart",                                  group="Volume Settings")
+
+// ── Volume Table Settings ─────────────────────────────────────────────────
+showVolTable           = input.bool(true,  "Show Volume Table",                                                  group="Volume Table")
+tableTextSize          = input.string("small", "Table Text Size", options=["tiny","small","normal"],             group="Volume Table")
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 3 — HELPER FUNCTIONS (52-Week)
+// ═══════════════════════════════════════════════════════════════════════════
+
+method dynamicLookbackLength(int desiredLength) =>
+    result = math.min(desiredLength, bar_index + 1)
+    if bar_index % 50 == 0
+        log.info("Dynamic lookback — Desired: {0}, BarIdx: {1}, Calc: {2}", desiredLength, bar_index, result)
+    result
+
+isWithin365Days(int barsBack) =>
+    if barsBack == 0
+        true
+    else
+        daysDiff = (time - time[barsBack]) / 86400000
+        daysDiff <= MAX_CALENDAR_DAYS
+
+getValidHigh(int lkb) =>
+    var float h = na
+    h := high
+    for i = 1 to lkb - 1
+        if isWithin365Days(i) and high[i] > h
+            h := high[i]
+    h
+
+getValidLow(int lkb) =>
+    var float l = na
+    l := low
+    for i = 1 to lkb - 1
+        if isWithin365Days(i) and low[i] < l
+            l := low[i]
+    l
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 4 — 52-WEEK CALCULATIONS
+// ═══════════════════════════════════════════════════════════════════════════
+
+int dynamic_length = dynamicLookbackLength(length)
+
+high_52w = getValidHigh(dynamic_length)
+low_52w  = getValidLow(dynamic_length)
+
+if high_52w != high_52w[1]
+    log.info("52WK HIGH UPDATED — {0} → {1}  [{2}]", high_52w[1], high_52w, str.format_time(time, "yyyy-MM-dd"))
+if low_52w != low_52w[1]
+    log.info("52WK LOW UPDATED  — {0} → {1}  [{2}]", low_52w[1],  low_52w,  str.format_time(time, "yyyy-MM-dd"))
+
+new_high = high == high_52w
+new_low  = low  == low_52w
+
+if new_high
+    log.info("🚀 NEW 52W HIGH — {0}  [{1}]", high, str.format_time(time, "yyyy-MM-dd HH:mm"))
+if new_low
+    log.warning("📉 NEW 52W LOW  — {0}  [{1}]", low, str.format_time(time, "yyyy-MM-dd HH:mm"))
+
+// Core % metrics
+drop_percent            = ((high_52w    - close)    / high_52w)    * 100
+prev_drop_percent       = ((high_52w[1] - close[1]) / high_52w[1]) * 100
+up_from_52w_low_percent = ((close - low_52w) / low_52w) * 100
+
+// Intraday strength
+intraday_pct              = ((close - low) / low) * 100
+sig_intraday              = intraday_pct > 5.0
+intraday_text             = sig_intraday ? "\nIntraday Increase: " + str.tostring(intraday_pct, format.percent) : ""
+up_from_low_text          = drop_percent < 15 ? "\nUp from 52W Low: " + str.tostring(up_from_52w_low_percent, format.percent) : ""
+
+// Zone detection
+is_last_bar() => bar_index == last_bar_index
+bull_zone = is_last_bar() and (prev_drop_percent > 15 and drop_percent <= 15)
+bear_zone = is_last_bar() and (prev_drop_percent <= 15 and drop_percent > 15)
+in_bull_zone = drop_percent <= 15   // runtime — not last-bar restricted
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 5 — VOLUME CALCULATIONS (Phase 4 / Phase 15 Logic)
+// ═══════════════════════════════════════════════════════════════════════════
+
+// 5A — Average volume (safe dynamic cap)
+safeVolAvgLen = math.min(volAvgLength, bar_index + 1)
+avgVol        = ta.sma(volume, safeVolAvgLen)
+volRatio      = avgVol > 0 ? volume / avgVol : na
+
+// 5B — Candle anatomy
+isUpDay       = close >= open
+isDownDay     = close <  open
+rangeSize     = high - low
+closePos      = rangeSize > 0 ? (close - low) / rangeSize : 0.5  // 0=at low, 1=at high
+closePosLabel = closePos >= 0.6 ? "Upper " + str.tostring(math.round(closePos * 100)) + "%" : closePos <= 0.4 ? "Lower " + str.tostring(math.round((1 - closePos) * 100)) + "%" : "Mid " + str.tostring(math.round(closePos * 100)) + "%"
+
+// 5C — Accumulation Day
+// Behavior: Institutions buying — up candle, heavy volume, price closed strong
+// Phase logic: Most significant in Phase 4 base-building and early Phase 5 breakout
+isAccumulationDay = isUpDay and (volRatio >= accumMultiplier) and (closePos >= 0.4)
+
+// 5D — Distribution Day
+// Behavior: Institutions exiting — down candle, heavy volume, price closed weak
+// Phase logic: Watch count — 3-5 in 4 weeks = topping signal even if index looks ok
+isDistributionDay = isDownDay and (volRatio >= accumMultiplier) and (closePos <= 0.6)
+
+// 5E — Climax / Exhaustion Volume
+// Behavior: Extreme volume — either capitulation sell or blow-off buy
+// Phase logic: Bear phase climax = buying opportunity; Bull phase climax = exit warning
+isClimaxVolume    = volRatio >= climaxMultiplier
+isClimaxUp        = isClimaxVolume and isUpDay    // Blow-off top warning
+isClimaxDown      = isClimaxVolume and isDownDay  // Capitulation — potential bottom
+
+// 5F — Pocket Pivot (Gil Morales / Chris Kacher)
+// Behavior: Up day volume that exceeds the highest down-day volume in recent bars
+// This means buyers overpower recent sellers — quiet institutional accumulation before breakout
+// Phase logic: Phase 4 bottom / base formation — earliest reliable entry signal
+downDayVol     = isDownDay ? volume : 0
+safePPLookback = math.min(ppLookback, bar_index + 1)
+highestDnVol   = ta.highest(downDayVol, safePPLookback)
+isPocketPivot  = isUpDay and (volume > highestDnVol) and (volRatio >= 1.0) and not isClimaxVolume
+// Pocket pivot must NOT be a climax — it's quiet strength, not a spike
+
+// 5G — Dry Up / No Supply
+// Behavior: Sellers have exhausted — no supply coming to market
+// Price holds up OR rises on minimal volume = stock resting, not dying
+// Phase logic: Most powerful in Phase 4 bottoming / base right side — pre-breakout tell
+isDryUp = (volRatio <= dryUpMultiplier) and (close >= open or close >= close[1] * 0.995)
+
+// 5H — U/D Volume Ratio (efficient running sum — zero loop risk)
+// > 1.5 = strong accumulation phase | < 0.75 = distribution phase
+upVolDay = isUpDay   ? volume : 0
+dnVolDay = isDownDay ? volume : 0
+safeUDLen = math.min(udLookback, bar_index + 1)
+upVolSum  = math.sum(upVolDay, safeUDLen)
+dnVolSum  = math.sum(dnVolDay, safeUDLen)
+udRatio   = dnVolSum > 0 ? upVolSum / dnVolSum : na
+udLabel   = na(udRatio) ? "n/a" : udRatio >= 1.5 ? str.tostring(math.round(udRatio, 2)) + " ▲ Bullish" : udRatio <= 0.75 ? str.tostring(math.round(udRatio, 2)) + " ▼ Bearish" : str.tostring(math.round(udRatio, 2)) + " — Neutral"
+
+// 5I — Avg ₹ Volume in Crores (INR calibrated)
+avgRupeeVol = ta.sma(close * volume, safeVolAvgLen) / 10000000
+
+var string volPattern = "— Normal"
+volPattern := isClimaxDown ? "🔥 CLIMAX SELL — Capitulation?" : isClimaxUp ? "🔥 CLIMAX BUY  — Blow-off Top?" : isPocketPivot ? "🎯 POCKET PIVOT" : isAccumulationDay ? "📈 ACCUMULATION" : isDistributionDay ? "📉 DISTRIBUTION" : isDryUp ? "🔵 DRY UP / No Supply" : volRatio >= 1.2 ? "📊 Above Avg Vol" : volRatio <= 0.8 ? "📉 Below Avg Vol" : "— Normal"
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 6 — CHART MARKERS
+// ═══════════════════════════════════════════════════════════════════════════
+
+// 52W High / Low markers (existing)
+plotshape(new_high, location=location.abovebar, color=color.green, style=shape.triangleup,   title="New 52W High", size=size.tiny)
+plotshape(new_low,  location=location.belowbar, color=color.red,   style=shape.triangledown, title="New 52W Low",  size=size.tiny)
+
+// Pocket Pivot — blue circle above bar
+plotshape(
+  showPocketPivotMark and isPocketPivot,
+  location  = location.abovebar,
+  color     = color.new(color.blue, 15),
+  style     = shape.circle,
+  title     = "Pocket Pivot",
+  size      = size.small)
+
+// Climax Down — orange diamond below bar (capitulation signal)
+plotshape(
+  isClimaxDown,
+  location  = location.belowbar,
+  color     = color.new(color.orange, 15),
+  style     = shape.diamond,
+  title     = "Climax Sell / Capitulation",
+  size      = size.small)
+
+// Climax Up — orange diamond above bar (blow-off warning)
+plotshape(
+  isClimaxUp,
+  location  = location.abovebar,
+  color     = color.new(color.orange, 15),
+  style     = shape.diamond,
+  title     = "Climax Buy / Blow-off",
+  size      = size.small)
+
+// Hidden plots (existing — data window / external scripts)
+plot(showDropPercentage     ? drop_percent  : na, "Drop % from 52W High",  color.new(color.red,    0), 2, plot.style_line, display=display.none)
+plot(showPullbackPercentage ? intraday_pct  : na, "Pullback from Days Low", color.new(color.red,    0), 2, plot.style_line, display=display.none)
+plot(volRatio,                                    "Vol Ratio (× Avg)",      color.new(color.blue,   0), 1, plot.style_line, display=display.none)
+plot(udRatio,                                     "U/D Volume Ratio",       color.new(color.purple, 0), 1, plot.style_line, display=display.none)
+plot(avgRupeeVol,                                 "Avg ₹ Vol (Crores)",     color.new(color.orange, 0), 1, plot.style_line, display=display.none)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 7 — PRICE CHART LABELS (Last Bar — 52W data only, volume removed)
+// ═══════════════════════════════════════════════════════════════════════════
+
+if is_last_bar()
+    labelColor = drop_percent > 15 ? color.red : color.green
+
+    if (bull_zone or bear_zone)
+        label.new(
+          x         = bar_index,
+          y         = low,
+          text      = "52W High: "          + str.tostring(high_52w, format.mintick)  +
+                      "\nCurrent Drop %: "  + str.tostring(drop_percent,     format.percent) +
+                      "\nPrev Bar Drop %: " + str.tostring(prev_drop_percent, format.percent) +
+                      intraday_text         +
+                      up_from_low_text,
+          color     = labelColor,
+          style     = label.style_label_up,
+          textcolor = color.white)
+    else
+        label.new(
+          x         = bar_index,
+          y         = low,
+          text      = str.tostring(drop_percent, format.percent) +
+                      intraday_text   +
+                      up_from_low_text,
+          color     = labelColor,
+          style     = label.style_label_up,
+          textcolor = color.white)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 8 — VOLUME TABLE (Bottom-Left | Runtime | Every Bar)
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Resolve text size
+tSize = tableTextSize == "tiny" ? size.tiny : tableTextSize == "normal" ? size.normal : size.small
+
+// Color helpers
+colGreen  = color.new(#00C853, 0)   // Vivid green — bullish
+colRed    = color.new(#FF1744, 0)   // Vivid red   — bearish
+colOrange = color.new(#FF6D00, 0)   // Orange      — climax / warning
+colBlue   = color.new(#2962FF, 0)   // Blue        — dry up / neutral
+colGold   = color.new(#FFD600, 0)   // Gold        — pocket pivot
+colWhite  = color.white
+colDark   = color.new(#0D1117, 95)  // Near-black semi-transparent bg
+colHeader = color.new(#1A237E, 90)  // Dark navy header bg
+colRowA   = color.new(#0D1117, 88)  // Row A bg
+colRowB   = color.new(#131920, 88)  // Row B bg (alternating)
+colBorder = color.new(#37474F, 60)  // Subtle border
+
+// Signal badge color
+signalBadgeColor = isClimaxVolume ? colOrange : isPocketPivot ? colGold : isAccumulationDay ? colGreen : isDistributionDay ? colRed : isDryUp ? colBlue : color.new(#455A64, 80)
+
+// Vol ratio color (gradient feel via thresholds)
+volRatioColor = na(volRatio) ? colWhite : volRatio >= 2.5 ? colOrange : volRatio >= 1.5 ? colGreen : volRatio >= 1.2 ? color.new(#69F0AE, 0) : volRatio <= 0.5 ? colBlue : colWhite
+
+// U/D ratio color
+udColor = na(udRatio) ? colWhite : udRatio >= 1.5 ? colGreen : udRatio <= 0.75 ? colRed : colWhite
+
+// Candle type display
+candleTypeText  = isUpDay ? "▲  Up Day"   : "▼  Down Day"
+candleTypeColor = isUpDay ? colGreen      : colRed
+
+// Pocket Pivot display
+ppText  = isPocketPivot ? "✅  YES" : "✗  No"
+ppColor = isPocketPivot ? colGold   : color.new(#546E7A, 0)
+
+// Dry Up display
+dryUpText  = isDryUp ? "🔵  YES" : "✗  No"
+dryUpColor = isDryUp ? colBlue  : color.new(#546E7A, 0)
+
+// Zone display
+zoneText  = in_bull_zone ? "🟢  Bull Zone (< 15% from 52W High)" : "🔴  Bear Zone (> 15% from 52W High)"
+zoneColor = in_bull_zone ? colGreen : colRed
+
+// Volume formatting helper
+formatVol(float v) =>
+    v >= 10000000 ? str.tostring(math.round(v / 10000000, 2)) + " Cr" : v >= 100000 ? str.tostring(math.round(v / 100000, 2)) + " L" : str.tostring(math.round(v, 0))
+
+// ── Table construction ────────────────────────────────────────────────────
+// Persistent table — created once, updated every bar
+var table volTable = table.new(
+  position      = position.bottom_left,
+  columns       = 2,
+  rows          = 13,
+  bgcolor       = colDark,
+  border_color  = colBorder,
+  border_width  = 1,
+  frame_color   = colBorder,
+  frame_width   = 1)
+
+// Helper to set a row cleanly
+setRow(table t, int r, string label, string val, color valCol, color bg) =>
+    table.cell(t, 0, r, label,  text_color=color.new(#90A4AE, 0), text_size=tSize, bgcolor=bg,    text_halign=text.align_left)
+    table.cell(t, 1, r, val,    text_color=valCol,                 text_size=tSize, bgcolor=bg,    text_halign=text.align_right)
+
+if showVolTable
+    // ── Row 0 — Header ────────────────────────────────────────────
+    table.cell(volTable, 0, 0, "📊  VOLUME ANALYSIS", text_color=colWhite,       text_size=tSize, bgcolor=colHeader, text_halign=text.align_left)
+    table.cell(volTable, 1, 0, volPattern,             text_color=signalBadgeColor, text_size=tSize, bgcolor=colHeader, text_halign=text.align_right)
+
+    // ── Row 1 — Today's Volume ────────────────────────────────────
+    setRow(volTable, 1,
+      "  Today Volume",
+      formatVol(volume),
+      colWhite, colRowA)
+
+    // ── Row 2 — Average Volume ────────────────────────────────────
+    setRow(volTable, 2,
+      "  Avg Vol (" + str.tostring(volAvgLength) + "d)",
+      formatVol(avgVol),
+      colWhite, colRowB)
+
+    // ── Row 3 — Volume Ratio ──────────────────────────────────────
+    setRow(volTable, 3,
+      "  Vol Ratio",
+      str.tostring(math.round(volRatio, 2)) + "×  Avg",
+      volRatioColor, colRowA)
+
+    // ── Row 4 — Candle Type ───────────────────────────────────────
+    setRow(volTable, 4,
+      "  Candle",
+      candleTypeText,
+      candleTypeColor, colRowB)
+
+    // ── Row 5 — Close Position in Range ──────────────────────────
+    setRow(volTable, 5,
+      "  Close in Range",
+      closePosLabel,
+      closePos >= 0.6 ? colGreen : closePos <= 0.4 ? colRed : colWhite,
+      colRowA)
+
+    // ── Row 6 — Volume Pattern ────────────────────────────────────
+    setRow(volTable, 6,
+      "  Pattern",
+      volPattern,
+      signalBadgeColor, colRowB)
+
+    // ── Row 7 — Pocket Pivot ──────────────────────────────────────
+    setRow(volTable, 7,
+      "  Pocket Pivot",
+      ppText,
+      ppColor, colRowA)
+
+    // ── Row 8 — Dry Up ────────────────────────────────────────────
+    setRow(volTable, 8,
+      "  Dry Up / No Supply",
+      dryUpText,
+      dryUpColor, colRowB)
+
+    // ── Row 9 — U/D Volume Ratio ──────────────────────────────────
+    setRow(volTable, 9,
+      "  U/D Ratio (" + str.tostring(udLookback) + "d)",
+      udLabel,
+      udColor, colRowA)
+
+    // ── Row 10 — Avg ₹ Volume ─────────────────────────────────────
+    setRow(volTable, 10,
+      "  Avg ₹ Vol (20d)",
+      "₹" + str.tostring(math.round(avgRupeeVol, 1)) + " Cr",
+      colWhite, colRowB)
+
+    // ── Row 11 — 52W Zone Context ─────────────────────────────────
+    setRow(volTable, 11,
+      "  52W Zone",
+      zoneText,
+      zoneColor, colRowA)
+
+    // ── Row 12 — Drop from 52W High ───────────────────────────────
+    setRow(volTable, 12,
+      "  Drop from 52W High",
+      str.tostring(math.round(drop_percent, 2)) + "%",
+      drop_percent <= 15 ? colGreen : colRed,
+      colRowB)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 9 — LOGS
+// ═══════════════════════════════════════════════════════════════════════════
+
+if isAccumulationDay
+    log.info("📈 ACCUM DAY — VolRatio: {0}x | ClosePos: {1} | {2}", math.round(volRatio,2), math.round(closePos,2), str.format_time(time,"yyyy-MM-dd"))
+if isDistributionDay
+    log.warning("📉 DIST DAY  — VolRatio: {0}x | ClosePos: {1} | {2}", math.round(volRatio,2), math.round(closePos,2), str.format_time(time,"yyyy-MM-dd"))
+if isClimaxVolume
+    log.warning("🔥 CLIMAX    — VolRatio: {0}x | UpDay: {1} | {2}", math.round(volRatio,2), isUpDay, str.format_time(time,"yyyy-MM-dd"))
+if isPocketPivot
+    log.info("🎯 POCKET PIVOT — Vol: {0} | HighestDnVol: {1} | {2}", volume, highestDnVol, str.format_time(time,"yyyy-MM-dd"))
+if isDryUp
+    log.info("🔵 DRY UP — VolRatio: {0}x | {1}", math.round(volRatio,2), str.format_time(time,"yyyy-MM-dd"))
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 10 — ALERTS (ALL EOD — alert.freq_once_per_bar_close)
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ── 52W Alerts ────────────────────────────────────────────────────────────
+if new_high
+    alert("🚀 New 52-Week High! Price: " + str.tostring(high), alert.freq_once_per_bar_close)
+
+if new_low
+    alert("📉 New 52-Week Low! Price: " + str.tostring(low), alert.freq_once_per_bar_close)
+
+if is_last_bar()
+    if bull_zone
+        alert("🟢 BULL ZONE ENTRY — Recovered from -15% drop! Drop now: " + str.tostring(math.round(drop_percent,2)) + "%", alert.freq_once_per_bar_close)
+    if bear_zone
+        alert("🔴 BEAR ZONE ENTRY — Dropped > 15% from 52W High! Drop: " + str.tostring(math.round(drop_percent,2)) + "%", alert.freq_once_per_bar_close)
+
+// ── Volume Alerts (EOD) ───────────────────────────────────────────────────
+if isAccumulationDay
+    alert(
+      "📈 ACCUMULATION DAY\n" +
+      "Vol: " + str.tostring(math.round(volRatio, 1)) + "× Avg | " +
+      "Close Position: " + closePosLabel + "\n" +
+      "Institutional buying detected | Phase 4/5 signal\n" +
+      "52W Zone: " + (in_bull_zone ? "Bull" : "Bear") + " | Drop from High: " + str.tostring(math.round(drop_percent,1)) + "%",
+      alert.freq_once_per_bar_close)
+
+if isDistributionDay
+    alert(
+      "📉 DISTRIBUTION DAY\n" +
+      "Vol: " + str.tostring(math.round(volRatio, 1)) + "× Avg | " +
+      "Close Position: " + closePosLabel + "\n" +
+      "Institutional selling detected — count the days!\n" +
+      "52W Zone: " + (in_bull_zone ? "Bull" : "Bear") + " | Drop from High: " + str.tostring(math.round(drop_percent,1)) + "%",
+      alert.freq_once_per_bar_close)
+
+if isClimaxUp
+    alert(
+      "🔥 CLIMAX BUY — Blow-off Top Warning!\n" +
+      "Vol: " + str.tostring(math.round(volRatio, 1)) + "× Avg\n" +
+      "Extreme up-day volume — possible exhaustion top\n" +
+      "Watch for reversal or heavy distribution next few days",
+      alert.freq_once_per_bar_close)
+
+if isClimaxDown
+    alert(
+      "🔥 CLIMAX SELL — Capitulation Signal!\n" +
+      "Vol: " + str.tostring(math.round(volRatio, 1)) + "× Avg\n" +
+      "Panic selling exhaustion — possible Phase 4 bottom\n" +
+      "Watch for Dry Up + Pocket Pivot sequence to confirm",
+      alert.freq_once_per_bar_close)
+
+if isPocketPivot
+    alert(
+      "🎯 POCKET PIVOT DETECTED\n" +
+      "Up-day volume (" + formatVol(volume) + ") beats all " + str.tostring(ppLookback) + "-bar down-day volume\n" +
+      "Early institutional accumulation — pre-breakout signal\n" +
+      "52W Zone: " + (in_bull_zone ? "Bull" : "Bear") + " | Vol Ratio: " + str.tostring(math.round(volRatio,2)) + "×",
+      alert.freq_once_per_bar_close)
+
+if isDryUp
+    alert(
+      "🔵 DRY UP / NO SUPPLY\n" +
+      "Vol only " + str.tostring(math.round(volRatio, 2)) + "× Avg — sellers exhausted\n" +
+      "Price holding up / stable — stock resting, not dying\n" +
+      "Often precedes a Pocket Pivot or breakout — watch closely",
+      alert.freq_once_per_bar_close)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 11 — ALERT CONDITIONS (TradingView Alert Manager)
+// ═══════════════════════════════════════════════════════════════════════════
+
+// 52W conditions
+alertcondition(new_high,   title="52W — New 52-Week High",     message="New 52-Week High!")
+alertcondition(new_low,    title="52W — New 52-Week Low",      message="New 52-Week Low!")
+alertcondition(bull_zone,  title="52W — Entered Bull Zone",    message="Entered Bull Zone — recovered from -15% drop!")
+alertcondition(bear_zone,  title="52W — Entered Bear Zone",    message="Entered Bear Zone — dropped > 15% from 52W High!")
+alertcondition(ta.crossover(drop_percent,  thresholdLevel), title="52W — Drop crossed below threshold",   message="Price dropped past threshold from 52W High")
+alertcondition(ta.crossunder(drop_percent, thresholdLevel), title="52W — Recovery crossed above threshold",message="Price recovered past threshold from 52W High")
+alertcondition(drop_percent >= thresholdLevel,              title="52W — Drop >= threshold",              message="Current drop above configured threshold")
+alertcondition(intraday_pct >= pullbackThreshold,           title="52W — Intraday Pullback Recovery",     message="Significant intraday recovery from day low")
+
+// Volume conditions
+alertcondition(isAccumulationDay, title="VOL — Accumulation Day",       message="Accumulation Day — high vol up candle, upper range close")
+alertcondition(isDistributionDay, title="VOL — Distribution Day",       message="Distribution Day — high vol down candle, lower range close")
+alertcondition(isClimaxUp,        title="VOL — Climax Buy / Blow-off",  message="Climax Buy — extreme up volume, possible blow-off top")
+alertcondition(isClimaxDown,      title="VOL — Climax Sell / Capitulation", message="Climax Sell — extreme down volume, possible capitulation bottom")
+alertcondition(isPocketPivot,     title="VOL — Pocket Pivot",           message="Pocket Pivot — up day beats all recent down-day volume")
+alertcondition(isDryUp,           title="VOL — Dry Up / No Supply",     message="Dry Up — very low volume, sellers exhausted, pre-breakout")
